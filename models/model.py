@@ -55,6 +55,7 @@ class MLP:
         for epoch in range(epochs):
             grad_fn = jax.value_and_grad(loss_fn)
             loss, grads = grad_fn(self.params)
+            print(loss)
             updates, self.optimizer_state = self.optimizer.update(grads, self.optimizer_state)
             self.params = optax.apply_updates(self.params, updates)
 

@@ -43,6 +43,10 @@ def main():
     for intervention, width, cover in zip(intervention_set, interval_width, coverage):
         print(f'Conditional Conformal | {intervention} | {width} | {cover}')
 
+    interval_width, coverage = interventional_conformal(rng_key, model, train_data, cal_data, X_name, Y_name, 
+                                                N, alpha, intervention_set, ground_truth_synthetic_intervene)
+    for intervention, width, cover in zip(intervention_set, interval_width, coverage):
+        print(f'Interventional Conformal | {intervention} | {width} | {cover}')
     pause = True
     return
 

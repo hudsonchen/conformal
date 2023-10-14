@@ -74,28 +74,24 @@ def load_compas():
 
 
 def generate_synthetic_data(rng_key, N, sex_ratio, race_ratio):
-    # Split the rng_key for each random operation
     key0, key1, key2, key3, key4, key5, key6 = jax.random.split(rng_key, 7)
     
-    # Define the exogenous distributions
     u = jax.random.uniform(key0, shape=(N,))
-    # p_nr = u
-    p_nr = race_ratio
+    p_nr = u    
+    # p_nr = (u + race_ratio) / 2
+    # p_nr = race_ratio
     p_ns = sex_ratio
     mu_nk = 0.0
     sigma_nk = 1.0
     
-    # Sample from Bernoulli distributions
     R = jnp.where(jax.random.uniform(key1, shape=(N,)) < p_nr, 1., 0.)
     S = jnp.where(jax.random.uniform(key2, shape=(N,)) < p_ns, 1., 0.)
     
-    # Sample from Gaussian distribution for knowledge (latent variable)
     K = jax.random.normal(key3, shape=(N,)) * sigma_nk + mu_nk
     # K = 0
-    # PseudoDelta
     G = jax.random.normal(key4, shape=(N,)) * 0.1 + (K + 4.0 * R + 1.5 * S) * u + u 
     L = jax.random.normal(key5, shape=(N,)) * 0.1 + (K + 6.0 * R + 0.5 * S) * u + u 
-    F = jax.random.normal(key6, shape=(N,)) * 0.1 + (K + 3.0 * R + 2.0 * S + jnp.exp(R)) * u + u 
+    F = jax.random.normal(key6, shape=(N,)) * 0.1 + (K + 3.0 * R + 2.0 * S + jnp.exp(R + 1)) * u + u 
 
     df = pd.DataFrame({
         'R': R,
@@ -120,7 +116,7 @@ def ground_truth_synthetic_intervene(rng_key, N, R, S):
     # PseudoDelta
     G = jax.random.normal(key4, shape=(N,)) * 0.1 + (K + 4.0 * R + 1.5 * S) * u + u 
     L = jax.random.normal(key5, shape=(N,)) * 0.1 + (K + 6.0 * R + 0.5 * S) * u + u 
-    F = jax.random.normal(key6, shape=(N,)) * 0.1 + (K + 3.0 * R + 2.0 * S + jnp.exp(R)) * u + u 
+    F = jax.random.normal(key6, shape=(N,)) * 0.1 + (K + 3.0 * R + 2.0 * S + jnp.exp(R + 1)) * u + u 
     return G, L, F
 
 
