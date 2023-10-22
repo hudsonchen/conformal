@@ -101,20 +101,37 @@ def weighted_conformal_prediction(df, metalearner="DR", quantile_regression=True
     Y_test = test_data[['Y']].values.reshape((-1,))
     ps_test = test_data[['ps']].values
 
-    model = WCP(alpha=alpha, base_learner="GBM", 
-                                    quantile_regression=quantile_regression, 
-                                    metalearner=metalearner) 
+    model = WCP(alpha=alpha, 
+                base_learner="GBM", 
+                quantile_regression=quantile_regression, 
+                metalearner=metalearner) 
 
     model.fit(X_train, T_train, Y_train, ps_train)
-    model.conformalize(alpha, X_calib_0, X_calib_1, T_calib, Y_calib_0, Y_calib_1)
+    model.conformalize(alpha, X_calib_0, X_calib_1, T_calib, Y_calib_0, Y_calib_1, method='naive')
 
-    C1, C0 = model.predict_counterfactuals(X_test)
+    C1, C0 = model.predict_counterfactuals(alpha, X_test, X_calib_0, Y_calib_0, X_calib_1, Y_calib_1)
 
     Y1, Y0 = test_data[['Y1']].values.reshape((-1,)), test_data[['Y0']].values.reshape((-1,))
 
     conditional_coverage_0 = np.mean((Y0 >= C0[0]) & (Y0 <= C0[1]))
     conditional_coverage_1 = np.mean((Y1 >= C1[0]) & (Y1 <= C1[1]))
-    print(conditional_coverage_0)
-    print(conditional_coverage_1)
+    print('Coverage of Y(0)', conditional_coverage_0)
+    print('Interval width of Y(0)', np.mean(np.abs(C0[1] - C0[0])))
+    print('Coverage of Y(1)', conditional_coverage_1)
+    print('Interval width of Y(1)', np.mean(np.abs(C1[1] - C1[0])))
+
+    model.conformalize(alpha, X_calib_0, X_calib_1, T_calib, Y_calib_0, Y_calib_1, method='naive')
+    CI_ITE_l, CI_ITE_u = model.predict_ITE(alpha, X_test, X_calib_0, Y_calib_0, X_calib_1, Y_calib_1, method='naive')
+    coverage_ITE = np.mean((Y1 - Y0 >= CI_ITE_l) & (Y1 - Y0 <= CI_ITE_u))
+    interval_width_ITE = np.mean(np.abs(CI_ITE_u - CI_ITE_l))
+    print('Coverage of ITE (naive)', coverage_ITE)
+    print('Interval width of ITE (naive)', interval_width_ITE)
+
+    model.conformalize(alpha, X_calib_0, X_calib_1, T_calib, Y_calib_0, Y_calib_1, method='nested_inexact')
+    CI_ITE_l, CI_ITE_u = model.predict_ITE(alpha, X_test, X_calib_0, Y_calib_0, X_calib_1, Y_calib_1, method='nested_inexact')
+    coverage_ITE = np.mean((Y1 - Y0 >= CI_ITE_l) & (Y1 - Y0 <= CI_ITE_u))
+    interval_width_ITE = np.mean(np.abs(CI_ITE_u - CI_ITE_l))
+    print('Coverage of ITE (nested inexact)', coverage_ITE)
+    print('Interval width of ITE (nested inexact)', interval_width_ITE)
     pause = True
     return conditional_coverage_0

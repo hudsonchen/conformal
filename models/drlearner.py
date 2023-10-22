@@ -163,7 +163,7 @@ class conformalMetalearner:
 
                 self.models_u[i].fit(X_2, Y_pseudo)
                 self.models_l[i].fit(X_2, Y_pseudo)
-            
+                
             else:
 
                 self.models_m[i].fit(X_2, Y_pseudo)
