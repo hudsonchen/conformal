@@ -6,8 +6,9 @@ from __future__ import absolute_import, division, print_function
 import sys, os, time
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split, StratifiedKFold
+from quantile_forest import RandomForestQuantileRegressor
 import numpy as np
 import models.utils as utils
 
@@ -18,7 +19,8 @@ if not sys.warnoptions:
 
 # Global options for baselearners (see class attributes below)
 
-base_learners_dict = dict({"GBM": GradientBoostingRegressor, "RF": RandomForestRegressor})
+base_learners_dict = dict({"GBM": GradientBoostingRegressor, 
+                           "QRF": RandomForestQuantileRegressor})
 
 
 class WCP:
@@ -27,7 +29,7 @@ class WCP:
 
     """
 
-    def __init__(self, n_folds=5, alpha=0.1, base_learner="GBM", quantile_regression=True, metalearner="DR"):
+    def __init__(self, train_data, n_folds=5, alpha=0.1, base_learner="GBM", quantile_regression=True):
 
         """
             :param n_folds: the number of folds for the DR learner cross-fitting (See [1])
@@ -42,83 +44,113 @@ class WCP:
         # set base learner
         self.base_learner        = base_learner
         self.quantile_regression = quantile_regression
+        self.n_folds             = n_folds
+        self.alpha               = alpha
         n_estimators_nuisance    = 100
         n_estimators_target      = 100
-        alpha_ = alpha 
         
-        # set meta learner type
-        self.metalearner  = metalearner
+        if self.base_learner == "GBM":
+            first_CQR_args_u = dict({"loss": "quantile", "alpha":1 - (self.alpha / 2), "n_estimators": n_estimators_target}) 
+            first_CQR_args_l = dict({"loss": "quantile", "alpha":self.alpha/2, "n_estimators": n_estimators_target}) 
+        elif self.base_learner == "QRF":
+            first_CQR_args_u = dict({"default_quantiles":1 - (self.alpha/2), "n_estimators": n_estimators_target})
+            first_CQR_args_l = dict({"default_quantiles":self.alpha/2, "n_estimators": n_estimators_target})
+        else:
+            raise ValueError('base_learner must be one of GBM, QRF')
+        self.models_u_0  = [base_learners_dict[self.base_learner](**first_CQR_args_u) for _ in range(self.n_folds)]
+        self.models_l_0  = [base_learners_dict[self.base_learner](**first_CQR_args_l) for _ in range(self.n_folds)] 
+        self.models_u_1  = [base_learners_dict[self.base_learner](**first_CQR_args_u) for _ in range(self.n_folds)]
+        self.models_l_1  = [base_learners_dict[self.base_learner](**first_CQR_args_l) for _ in range(self.n_folds)] 
 
-        # set cross-fitting parameters and plug-in models for \mu_0 and \mu_1
-        self.n_folds      = n_folds
+        self.pscores_models = [GradientBoostingClassifier() for _ in range(self.n_folds)]
+
+        if self.base_learner == "GBM":
+            second_CQR_args_u = dict({"loss": "quantile", "alpha":0.6, "n_estimators": n_estimators_target})
+            second_CQR_args_l = dict({"loss": "quantile", "alpha":0.4, "n_estimators": n_estimators_target})
+        elif self.base_learner == "QRF":
+            second_CQR_args_u = dict({"default_quantiles":0.6, "n_estimators": n_estimators_target}) 
+            second_CQR_args_l = dict({"default_quantiles":0.4, "n_estimators": n_estimators_target})
         
-        base_args_u    = dict({"loss": "quantile", "alpha":1 - (alpha_/2), "n_estimators": n_estimators_target}) 
-        base_args_l    = dict({"loss": "quantile", "alpha":alpha_/2, "n_estimators": n_estimators_target}) 
+        self.tilde_C_ITE_model_u = [base_learners_dict[self.base_learner](**second_CQR_args_u) for _ in range(self.n_folds)] 
+        self.tilde_C_ITE_model_l = [base_learners_dict[self.base_learner](**second_CQR_args_l) for _ in range(self.n_folds)] 
 
-        self.models_u_0  = [base_learners_dict[self.base_learner](**base_args_u) for _ in range(self.n_folds)]
-        self.models_l_0  = [base_learners_dict[self.base_learner](**base_args_l) for _ in range(self.n_folds)] 
-        self.models_u_1  = [base_learners_dict[self.base_learner](**base_args_u) for _ in range(self.n_folds)]
-        self.models_l_1  = [base_learners_dict[self.base_learner](**base_args_l) for _ in range(self.n_folds)] 
+        # initialize the lists for storing the cross-fitting indices
+        self.train_data = train_data
+        self.train_index_list = []
+        self.calib_index_list = []
+        for _ in range(self.n_folds):
+            self.train_index_list.append(np.random.permutation(train_data.index)[:int(0.75 * len(train_data.index))])
+            self.calib_index_list.append(np.random.permutation(train_data.index)[int(0.75 * len(train_data.index)):])   
+        
+        self.X_train_list, self.T_train_list, self.Y_train_list = [], [], []
+        self.X_calib_list, self.T_calib_list, self.Y_calib_list = [], [], []
+        for i in range(self.n_folds):
+            self.X_train_list.append(train_data.loc[self.train_index_list[i]].filter(like = 'X').values)
+            self.T_train_list.append(train_data.loc[self.train_index_list[i]]['T'].values)
+            self.Y_train_list.append(train_data.loc[self.train_index_list[i]]['Y'].values)
+            self.X_calib_list.append(train_data.loc[self.calib_index_list[i]].filter(like = 'X').values)
+            self.T_calib_list.append(train_data.loc[self.calib_index_list[i]]['T'].values)
+            self.Y_calib_list.append(train_data.loc[self.calib_index_list[i]]['Y'].values)
+        return
 
-        self.pscores_models = [LogisticRegression() for _ in range(self.n_folds)]
-
-        self.tilde_C_ITE_model = [base_learners_dict[self.base_learner]() for _ in range(2)] 
-        # set the meta-learner and cross-fitting parameters
-        self.skf          = StratifiedKFold(n_splits=self.n_folds)  
-
-
-    def fit(self, X, W, Y, pscores):
-
+    def fit(self):
         """
         Fits the plug-in models and meta-learners using the sample (X, W, Y) and true propensity scores pscores
-
-        :param W: treatment assignment indicator
-        :param pscores: true propensity scores
-        :param Y: observed factual outcomes
-        :param X: covariates
-        :param oracle_pscore: whether use the true propensity scores or the estimated ones
-
         """
 
         # loop over the cross-fitting folds
+        for i in range(self.n_folds):
+            X_train, T_train, Y_train = self.X_train_list[i], self.T_train_list[i], self.Y_train_list[i]
 
-        for i, (train_index, test_index) in enumerate(self.skf.split(W, W)):
-        
-            X_train, W_train, Y_train, pscores_train = X[train_index, :], W[train_index], Y[train_index], pscores[train_index]
-            X_test, W_test, Y_test, pscores_test = X[test_index, :], W[test_index], Y[test_index], pscores[test_index]
+            self.pscores_models[i].fit(X_train, T_train)
+            self.models_u_0[i].fit(X_train[T_train==0, :], Y_train[T_train==0])
+            self.models_l_0[i].fit(X_train[T_train==0, :], Y_train[T_train==0])
+            self.models_u_1[i].fit(X_train[T_train==1, :], Y_train[T_train==1])
+            self.models_l_1[i].fit(X_train[T_train==1, :], Y_train[T_train==1])
 
-            self.pscores_models[i].fit(X_train, W_train)
-            self.models_u_0[i].fit(X_train[W_train==0, :], Y_train[W_train==0])
-            self.models_l_0[i].fit(X_train[W_train==0, :], Y_train[W_train==0])
-            self.models_u_1[i].fit(X_train[W_train==1, :], Y_train[W_train==1])
-            self.models_l_1[i].fit(X_train[W_train==1, :], Y_train[W_train==1])
+    def predict_counterfactuals(self, alpha, X_test):
+        y0_l_list, y0_u_list, y1_l_list, y1_u_list = [], [], [], []
+        offset_0_list, offset_1_list = [], []
 
-    def predict_counterfactuals(self, alpha, X_test, X_calib_0, Y_calib_0, X_calib_1, Y_calib_1):
-        Y1_calib_hat_u = utils.cross_fold_computation(self.models_u_1, X_calib_1, logistic_reg=False)
-        Y1_calib_hat_l = utils.cross_fold_computation(self.models_l_1, X_calib_1, logistic_reg=False)
-        weights_calib_1, weights_test_1, scores = utils.weights_and_scores(self.weight_1, X_test, X_calib_1, Y_calib_1, 
-                                            Y1_calib_hat_l, Y1_calib_hat_u, self.pscores_models)
-        offset_1 = utils.weighted_conformal(alpha, weights_calib_1, weights_test_1, scores)
+        for i in range(self.n_folds):
+            X_calib_0 = self.X_calib_list[i][self.T_calib_list[i]==0, :]
+            X_calib_1 = self.X_calib_list[i][self.T_calib_list[i]==1, :]
+            Y_calib_0 = self.Y_calib_list[i][self.T_calib_list[i]==0]
+            Y_calib_1 = self.Y_calib_list[i][self.T_calib_list[i]==1]
+
+            Y1_calib_hat_u = self.models_u_1[i].predict(X_calib_1)
+            Y1_calib_hat_l = self.models_l_1[i].predict(X_calib_1)
+            weights_calib_1, weights_test_1, scores_1 = utils.weights_and_scores(self.weight_1, X_test, X_calib_1, Y_calib_1, 
+                                                Y1_calib_hat_l, Y1_calib_hat_u, self.pscores_models[i])
+            offset_1 = utils.weighted_conformal(alpha, weights_calib_1, weights_test_1, scores_1)
+            
+            Y0_calib_hat_u = self.models_u_0[i].predict(X_calib_0)
+            Y0_calib_hat_l = self.models_l_0[i].predict(X_calib_0)
+            weights_calib_0, weights_test_0, scores_0 = utils.weights_and_scores(self.weight_0, X_test, X_calib_0, Y_calib_0, 
+                                                Y0_calib_hat_l, Y0_calib_hat_u, self.pscores_models[i])
+            offset_0 = utils.weighted_conformal(alpha, weights_calib_0, weights_test_0, scores_0)
+
+            offset_0_list.append(offset_0)
+            offset_1_list.append(offset_1)
+
+            y1_l = self.models_l_1[i].predict(X_test)
+            y1_u = self.models_u_1[i].predict(X_test)
+            y0_l = self.models_l_0[i].predict(X_test)
+            y0_u = self.models_u_0[i].predict(X_test)
+            
+            y0_l_list.append(y0_l)
+            y0_u_list.append(y0_u)
+            y1_l_list.append(y1_l)
+            y1_u_list.append(y1_u)
         
-        Y0_calib_hat_u = utils.cross_fold_computation(self.models_u_0, X_calib_0, logistic_reg=False)
-        Y0_calib_hat_l = utils.cross_fold_computation(self.models_l_0, X_calib_0, logistic_reg=False)
-        weights_calib_0, weights_test_0, scores = utils.weights_and_scores(self.weight_0, X_test, X_calib_0, Y_calib_0, 
-                                            Y0_calib_hat_l, Y0_calib_hat_u, self.pscores_models)
-        offset_0 = utils.weighted_conformal(alpha, weights_calib_0, weights_test_0, scores)
-    
-        y1_l = utils.cross_fold_computation(self.models_l_1, X_test, logistic_reg=False)
-        y1_u = utils.cross_fold_computation(self.models_u_1, X_test, logistic_reg=False)
-        y0_l = utils.cross_fold_computation(self.models_l_0, X_test, logistic_reg=False)
-        y0_u = utils.cross_fold_computation(self.models_u_0, X_test, logistic_reg=False)
-        
-        y1_u += offset_1
-        y1_l -= offset_1
-        y0_u += offset_0
-        y0_l -= offset_0
+        y0_l = np.median(np.array(y0_l_list), axis=0) - np.median(np.array(offset_0_list), axis=0)
+        y0_u = np.median(np.array(y0_u_list), axis=0) + np.median(np.array(offset_0_list), axis=0)
+        y1_l = np.median(np.array(y1_l_list), axis=0) - np.median(np.array(offset_1_list), axis=0)
+        y1_u = np.median(np.array(y1_u_list), axis=0) + np.median(np.array(offset_1_list), axis=0)
         pause = True
-        return [y1_l, y1_u], [y0_l, y0_u]
+        return [y0_l, y0_u], [y1_l, y1_u]
     
-    def predict_ITE(self, alpha, X_test, X_calib_0, Y_calib_0, X_calib_1, Y_calib_1, method='naive'):
+    def predict_ITE(self, alpha, X_test, method='naive'):
         """
         Interval-valued prediction of ITEs
 
@@ -128,101 +160,168 @@ class WCP:
 
         """
         if method == 'naive':
-            Y1_calib_hat_u = utils.cross_fold_computation(self.models_u_1, X_calib_1, logistic_reg=False)
-            Y1_calib_hat_l = utils.cross_fold_computation(self.models_l_1, X_calib_1, logistic_reg=False)
-            weights_calib_1, weights_test_1, scores = utils.weights_and_scores(self.weight_1, X_test, X_calib_1, Y_calib_1, 
-                                                Y1_calib_hat_l, Y1_calib_hat_u, self.pscores_models)
-            offset_1 = utils.weighted_conformal(alpha, weights_calib_1, weights_test_1, scores)
-            
-            Y0_calib_hat_u = utils.cross_fold_computation(self.models_u_0, X_calib_0, logistic_reg=False)
-            Y0_calib_hat_l = utils.cross_fold_computation(self.models_l_0, X_calib_0, logistic_reg=False)
-            weights_calib_0, weights_test_0, scores = utils.weights_and_scores(self.weight_0, X_test, X_calib_0, Y_calib_0, 
-                                                Y0_calib_hat_l, Y0_calib_hat_u, self.pscores_models)
-            offset_0 = utils.weighted_conformal(alpha, weights_calib_0, weights_test_0, scores)
-        
-            y1_l = utils.cross_fold_computation(self.models_l_1, X_test, logistic_reg=False)
-            y1_u = utils.cross_fold_computation(self.models_u_1, X_test, logistic_reg=False)
-            y0_l = utils.cross_fold_computation(self.models_l_0, X_test, logistic_reg=False)
-            y0_u = utils.cross_fold_computation(self.models_u_0, X_test, logistic_reg=False)
-            
-            y1_u += offset_1
-            y1_l -= offset_1
-            y0_u += offset_0
-            y0_l -= offset_0
-            return y1_l - y0_u, y1_u - y0_l
+            C0, C1 = self.predict_counterfactuals(alpha, X_test)
+            return C1[0] - C0[1], C1[1] - C0[0]
         
         elif method == 'nested_inexact':
-            CI_ITE_l = self.tilde_C_ITE_model[0].predict(X_test)
-            CI_ITE_u = self.tilde_C_ITE_model[1].predict(X_test)
-            
+            CI_ITE_l_list, CI_ITE_u_list = [], []
+            for i in range(self.n_folds):
+                CI_ITE_l = self.tilde_C_ITE_model_l[i].predict(X_test)
+                CI_ITE_u = self.tilde_C_ITE_model_u[i].predict(X_test)
+                CI_ITE_l_list.append(CI_ITE_l)
+                CI_ITE_u_list.append(CI_ITE_u)
+            CI_ITE_l = np.median(np.array(CI_ITE_l_list), axis=0)
+            CI_ITE_u = np.median(np.array(CI_ITE_u_list), axis=0)
             return CI_ITE_l, CI_ITE_u
         else:
             raise ValueError('method must be one of naive, nested_inexact, nested_exact')
 
 
-    def conformalize(self, alpha, X_calib_0, X_calib_1, W_calib, Y_calib_0, Y_calib_1, method='naive'):
+    def conformalize(self, alpha, method='naive'):
         """
         Calibrate the predictions of the meta-learner using standard conformal prediction
 
         """
         def weight_1(pscores_models, x):
-            pscores_calibs = utils.cross_fold_computation(pscores_models, x, logistic_reg=True)
-            return 1. / pscores_calibs
+            pscores = pscores_models.predict_proba(x)[:, 1]
+            return 1. / pscores
         
         def weight_0(pscores_models, x):
-            pscores_calibs = utils.cross_fold_computation(pscores_models, x, logistic_reg=True)
-            return 1. / (1.0 - pscores_calibs)
-        
+            pscores = pscores_models.predict_proba(x)[:, 1]
+            return 1. / (1.0 - pscores)
         
         if method == 'naive':   
             self.weight_0 = weight_0
             self.weight_1 = weight_1
             # Nothing needs to be done.
             pass 
-        elif method == 'nested_inexact':  
+        elif method == 'nested_inexact': 
+            for i in range(self.n_folds): 
+                X_calib_0 = self.X_calib_list[i][self.T_calib_list[i]==0, :]
+                X_calib_1 = self.X_calib_list[i][self.T_calib_list[i]==1, :]
+                Y_calib_0 = self.Y_calib_list[i][self.T_calib_list[i]==0]
+                Y_calib_1 = self.Y_calib_list[i][self.T_calib_list[i]==1]
 
-            X_calib_fold_one_0, X_calib_fold_two_0, Y_calib_fold_one_0, Y_calib_fold_two_0 = train_test_split(X_calib_0, Y_calib_0, test_size=0.5, random_state=42)
-            X_calib_fold_one_1, X_calib_fold_two_1, Y_calib_fold_one_1, Y_calib_fold_two_1 = train_test_split(X_calib_1, Y_calib_1, test_size=0.5, random_state=42)
+                calib_data = self.train_data.loc[self.calib_index_list[i]]
+                Y1_calib_0 = calib_data[calib_data['T'] == 0]['Y1'].values
+                Y0_calib_1 = calib_data[calib_data['T'] == 1]['Y0'].values
 
-            Y1_calib_hat_u = utils.cross_fold_computation(self.models_u_1, X_calib_fold_one_1, logistic_reg=False)
-            Y1_calib_hat_l = utils.cross_fold_computation(self.models_l_1, X_calib_fold_one_1, logistic_reg=False)
+                # X_calib_fold_one_0, X_calib_fold_two_0, Y_calib_fold_one_0, Y_calib_fold_two_0 = train_test_split(X_calib_0, Y_calib_0, index_0, test_size=0.5, random_state=42)
+                # X_calib_fold_one_1, X_calib_fold_two_1, Y_calib_fold_one_1, Y_calib_fold_two_1 = train_test_split(X_calib_1, Y_calib_1, index_1, test_size=0.5, random_state=42)
+                
+                X_calib_fold_one_0, X_calib_fold_two_0, Y_calib_fold_one_0, Y_calib_fold_two_0, Y1_calib_fold_one_0, Y1_calib_fold_two_0 = train_test_split(X_calib_0, Y_calib_0, Y1_calib_0, test_size=0.5, random_state=42)
+                X_calib_fold_one_1, X_calib_fold_two_1, Y_calib_fold_one_1, Y_calib_fold_two_1, Y0_calib_fold_one_1, Y0_calib_fold_two_1 = train_test_split(X_calib_1, Y_calib_1, Y0_calib_1, test_size=0.5, random_state=42)
+
+                Y1_calib_hat_u = self.models_u_1[i].predict(X_calib_fold_one_1)
+                Y1_calib_hat_l = self.models_l_1[i].predict(X_calib_fold_one_1)
+                
+                def weight_fn_1(pscores_models, x):
+                    pscores = pscores_models.predict_proba(x)[:, 1]
+                    return (1.0 - pscores) / pscores
             
-            def weight_fn(pscores_models, x):
-                pscores = utils.cross_fold_computation(pscores_models, x, logistic_reg=True)
+                weights_calib_1, weights_test_1, scores_1 = utils.weights_and_scores(weight_fn_1, X_calib_fold_two_0, X_calib_fold_one_1, 
+                                                                                     Y_calib_fold_one_1, 
+                                                                                     Y1_calib_hat_l, Y1_calib_hat_u, self.pscores_models[i])
+            
+                offset_1 = utils.weighted_conformal(alpha, weights_calib_1, weights_test_1, scores_1)
+            
+                Y0_calib_hat_u = self.models_u_0[i].predict(X_calib_fold_one_0)
+                Y0_calib_hat_l = self.models_l_0[i].predict(X_calib_fold_one_0)
+            
+                def weight_fn_0(pscores_models, x):
+                    pscores = pscores_models.predict_proba(x)[:, 1]
+                    return pscores / (1.0 - pscores)
+            
+                weights_calib_0, weights_test_0, scores_0 = utils.weights_and_scores(weight_fn_0, X_calib_fold_two_1, X_calib_fold_one_0, Y_calib_fold_one_0, 
+                                                                               Y0_calib_hat_l, Y0_calib_hat_u, self.pscores_models[i])
+                offset_0 = utils.weighted_conformal(alpha, weights_calib_0, weights_test_0, scores_0)
+
+                # ==================== Debug code ====================
+                # u1 = utils.cross_fold_computation(self.models_u_1, X_calib_fold_two_0, proba=False) + offset_1
+                # l1 = utils.cross_fold_computation(self.models_l_1, X_calib_fold_two_0, proba=False) - offset_1
+                # coverage_1 = np.mean((Y1_calib_fold_two_0 >= l1) & (Y1_calib_fold_two_0 <= u1))
+                # print('Debug: Coverage of Y(1) on second fold of calibration Y|T=1', coverage_1)
+                # u0 = utils.cross_fold_computation(self.models_u_0, X_calib_fold_two_1, proba=False) + offset_0
+                # l0 = utils.cross_fold_computation(self.models_l_0, X_calib_fold_two_1, proba=False) - offset_0
+                # coverage_0 = np.mean((Y0_calib_fold_two_1 >= l0) & (Y0_calib_fold_two_1 <= u0))
+                # print('Debug: Coverage of Y(0) on second fold of calibration Y|T=0', coverage_0)
+                # pause = True
+
+                # This is second line in Table 3 of Lei and Candes
+                # Note that C1 is for the control group
+                C1_u = (self.models_u_1[i].predict(X_calib_fold_two_0) + offset_1) - Y_calib_fold_two_0
+                C1_l = (self.models_l_1[i].predict(X_calib_fold_two_0) - offset_1) - Y_calib_fold_two_0
+                
+                # This is first line in Table 3 of Lei and Candes
+                # Note that C0 is for the control group
+                C0_u = Y_calib_fold_two_1 - (self.models_l_0[i].predict(X_calib_fold_two_1) - offset_0)
+                C0_l = Y_calib_fold_two_1 - (self.models_u_0[i].predict(X_calib_fold_two_1) + offset_0)
+
+                dummy_index = np.random.permutation(len(X_calib_fold_two_0) + len(X_calib_fold_two_1))
+                self.tilde_C_ITE_model_l[i].fit(np.concatenate((X_calib_fold_two_0, X_calib_fold_two_1))[dummy_index, :],
+                                            np.concatenate((C1_l, C0_l))[dummy_index])
+                                            
+                self.tilde_C_ITE_model_u[i].fit(np.concatenate((X_calib_fold_two_0, X_calib_fold_two_1))[dummy_index, :], 
+                                            np.concatenate((C1_u, C0_u))[dummy_index])
+                pause = True
+        elif method == 'nested_exact':
+            Y1_calib_0 = calib_data[calib_data['T'] == 0]['Y1'].values
+            Y0_calib_1 = calib_data[calib_data['T'] == 1]['Y0'].values
+
+            # X_calib_fold_one_0, X_calib_fold_two_0, Y_calib_fold_one_0, Y_calib_fold_two_0 = train_test_split(X_calib_0, Y_calib_0, index_0, test_size=0.5, random_state=42)
+            # X_calib_fold_one_1, X_calib_fold_two_1, Y_calib_fold_one_1, Y_calib_fold_two_1 = train_test_split(X_calib_1, Y_calib_1, index_1, test_size=0.5, random_state=42)
+            
+            X_calib_fold_one_0, X_calib_fold_two_0, Y_calib_fold_one_0, Y_calib_fold_two_0, Y1_calib_fold_one_0, Y1_calib_fold_two_0 = train_test_split(X_calib_0, Y_calib_0, Y1_calib_0, test_size=0.5, random_state=42)
+            X_calib_fold_one_1, X_calib_fold_two_1, Y_calib_fold_one_1, Y_calib_fold_two_1, Y0_calib_fold_one_1, Y0_calib_fold_two_1 = train_test_split(X_calib_1, Y_calib_1, Y0_calib_1, test_size=0.5, random_state=42)
+
+            Y1_calib_hat_u = utils.cross_fold_computation(self.models_u_1, X_calib_fold_one_1, proba=False)
+            Y1_calib_hat_l = utils.cross_fold_computation(self.models_l_1, X_calib_fold_one_1, proba=False)
+            
+            def weight_fn_1(pscores_models, x):
+                pscores = utils.cross_fold_computation(pscores_models, x, proba=True)
                 return (1.0 - pscores) / pscores
             
-            weights_calib_1, weights_test_1, scores = utils.weights_and_scores(weight_fn, X_calib_fold_two_0, X_calib_fold_one_1, Y_calib_fold_one_1, 
+            weights_calib_1, weights_test_1, scores_1 = utils.weights_and_scores(weight_fn_1, X_calib_fold_two_0, X_calib_fold_one_1, Y_calib_fold_one_1, 
                                                                                Y1_calib_hat_l, Y1_calib_hat_u, self.pscores_models)
             
-            offset_1 = utils.weighted_conformal(alpha, weights_calib_1, weights_test_1, scores)
+            offset_1 = utils.weighted_conformal(alpha, weights_calib_1, weights_test_1, scores_1)
             
-            Y0_calib_hat_u = utils.cross_fold_computation(self.models_u_0, X_calib_fold_one_0, logistic_reg=False)
-            Y0_calib_hat_l = utils.cross_fold_computation(self.models_l_0, X_calib_fold_one_0, logistic_reg=False)
+            Y0_calib_hat_u = utils.cross_fold_computation(self.models_u_0, X_calib_fold_one_0, proba=False)
+            Y0_calib_hat_l = utils.cross_fold_computation(self.models_l_0, X_calib_fold_one_0, proba=False)
             
-            def weight_fn(pscores_models, x):
-                pscores = utils.cross_fold_computation(pscores_models, x, logistic_reg=True)
+            def weight_fn_0(pscores_models, x):
+                pscores = utils.cross_fold_computation(pscores_models, x, proba=True)
                 return pscores / (1.0 - pscores)
             
-            weights_calib_0, weights_test_0, scores = utils.weights_and_scores(weight_fn, X_calib_fold_two_1, X_calib_fold_one_0, Y_calib_fold_one_0, 
+            weights_calib_0, weights_test_0, scores_0 = utils.weights_and_scores(weight_fn_0, X_calib_fold_two_1, X_calib_fold_one_0, Y_calib_fold_one_0, 
                                                                                Y0_calib_hat_l, Y0_calib_hat_u, self.pscores_models)
-            offset_0 = utils.weighted_conformal(alpha, weights_calib_0, weights_test_0, scores)
-            
+            offset_0 = utils.weighted_conformal(alpha, weights_calib_0, weights_test_0, scores_0)
+
+            # ==================== Debug code ====================
+            u1 = utils.cross_fold_computation(self.models_u_1, X_calib_fold_two_0, proba=False) + offset_1
+            l1 = utils.cross_fold_computation(self.models_l_1, X_calib_fold_two_0, proba=False) - offset_1
+            coverage_1 = np.mean((Y1_calib_fold_two_0 >= l1) & (Y1_calib_fold_two_0 <= u1))
+            print('Coverage of Y(1)', coverage_1)
+            u0 = utils.cross_fold_computation(self.models_u_0, X_calib_fold_two_1, proba=False) + offset_0
+            l0 = utils.cross_fold_computation(self.models_l_0, X_calib_fold_two_1, proba=False) - offset_0
+            coverage_0 = np.mean((Y0_calib_fold_two_1 >= l0) & (Y0_calib_fold_two_1 <= u0))
+            print('Coverage of Y(0)', coverage_0)
+            pause = True
+
             # This is second line in Table 3 of Lei and Candes
             # Note that C1 is for the control group
-            C1_u = (utils.cross_fold_computation(self.models_u_0, X_calib_fold_two_0, logistic_reg=False) + offset_1) - Y_calib_fold_two_0
-            C1_l = (utils.cross_fold_computation(self.models_l_0, X_calib_fold_two_0, logistic_reg=False) - offset_1) - Y_calib_fold_two_0
+            C1_u = (utils.cross_fold_computation(self.models_u_1, X_calib_fold_two_0, proba=False) + offset_1) - Y_calib_fold_two_0
+            C1_l = (utils.cross_fold_computation(self.models_l_1, X_calib_fold_two_0, proba=False) - offset_1) - Y_calib_fold_two_0
             
             # This is first line in Table 3 of Lei and Candes
             # Note that C0 is for the control group
-            C0_u = Y_calib_fold_two_1 - (utils.cross_fold_computation(self.models_l_0, X_calib_fold_two_1, logistic_reg=False) - offset_0)
-            C0_l = Y_calib_fold_two_1 - (utils.cross_fold_computation(self.models_u_0, X_calib_fold_two_1, logistic_reg=False) + offset_0)
+            C0_u = Y_calib_fold_two_1 - (utils.cross_fold_computation(self.models_l_0, X_calib_fold_two_1, proba=False) - offset_0)
+            C0_l = Y_calib_fold_two_1 - (utils.cross_fold_computation(self.models_u_0, X_calib_fold_two_1, proba=False) + offset_0)
 
-            self.tilde_C_ITE_model[0].fit(np.concatenate((X_calib_fold_two_0, X_calib_fold_two_1)),
-                                          np.concatenate((C1_l, C0_l)))
-            self.tilde_C_ITE_model[1].fit(np.concatenate((X_calib_fold_two_0, X_calib_fold_two_1)), 
-                                          np.concatenate((C1_u, C0_u)))
-            pause = True
-        elif method == 'nested_exact':
-            pass
+            dummy_index = np.random.permutation(len(X_calib_fold_two_0) + len(X_calib_fold_two_1))
+            C = np.concatenate((C1_l, C0_l))[dummy_index]
+            X = np.concatenate((X_calib_fold_two_0, X_calib_fold_two_1))[dummy_index, :]
+
+            
         else:
             raise ValueError('method must be one of naive, nested_inexact, nested_exact')

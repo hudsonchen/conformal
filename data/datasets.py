@@ -200,3 +200,58 @@ def generate_data(n_observation, n_intervention, d, gamma, alpha):
     df_intervention_T_1 = df_intervention[df_intervention["T"] == 1]
 
     return df_observation_T_0, df_observation_T_1, df_intervention_T_0, df_intervention_T_1
+
+
+def generate_lilei_hua_data():
+    # Replicate the demo from https://lihualei71.github.io/cfcausal/articles/cfcausal_demo.html
+    np.random.seed(2020)
+
+    def genY(X):
+        n = X.shape[0]
+        term1 = 2 / (1 + np.exp(-12 * (X[:, 0] - 0.5)))
+        term2 = 2 / (1 + np.exp(-12 * (X[:, 1] - 0.5)))
+        random_noise = norm.rvs(size=n)  # rnorm in R
+        return term1 * term2 + random_noise
+
+    n = 2000
+    d = 10
+
+    # Generate random uniform data
+    X = np.random.rand(n, d)
+
+    # Apply genY function
+    Y1 = genY(X)
+    Y0 = norm.rvs(size=n)  # rnorm in R
+
+    # Calculate 'ps' and 'T', then determine 'Y' based on 'T'
+    ps = (1 + beta.cdf(X[:, 0], 2, 4)) / 4
+    T = (ps < np.random.rand(n)).astype(int)
+    Y = np.where(T == 1, Y1, Y0)  # ifelse in R
+
+    # Generate testing data
+    ntest = 1000
+    Xtest = np.random.rand(ntest, d)
+
+    # Calculate 'pstest' and 'Ttest', then determine 'Ytest' based on 'Ttest'
+    pstest = (1 + beta.cdf(Xtest[:, 0], 2, 4)) / 4
+    Ttest = (pstest < np.random.rand(ntest)).astype(int)
+    Y1test = genY(Xtest)
+    Y0test = norm.rvs(size=ntest)  # rnorm in R
+    Ytest = np.where(Ttest == 1, Y1test, Y0test)  # ifelse in R
+
+
+    data_train         = np.column_stack((X, T, Y))
+    column_names = [f'X{i}' for i in range(1, d+1)] + ['T', 'Y']
+    df_train           = pd.DataFrame(data_train, columns=column_names)
+    df_train["ps"]     = np.array(ps).reshape((-1,))
+    df_train["Y1"]     = Y1
+    df_train["Y0"]     = Y0
+
+    data_test         = np.column_stack((Xtest, Ttest, Ytest))
+    column_names = [f'X{i}' for i in range(1, d+1)] + ['T', 'Y']
+    df_test           = pd.DataFrame(data_test, columns=column_names)
+    df_test["ps"]     = np.array(pstest).reshape((-1,))
+    df_test["Y1"]     = Y1test
+    df_test["Y0"]     = Y0test
+
+    return df_train, df_test

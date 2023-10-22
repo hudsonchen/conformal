@@ -10,9 +10,9 @@ from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.model_selection import train_test_split, StratifiedKFold
 import numpy as np
 
-def cross_fold_computation(models, X, logistic_reg):
+def cross_fold_computation(models, X, proba):
     y_list  = []
-    if logistic_reg:
+    if proba:
         for i in range(len(models)):
             y = models[i].predict_proba(X)[:, 1]
             y_list.append(y)
@@ -39,6 +39,7 @@ def weighted_conformal(alpha, weights_calib, weights_test, scores):
     weights_calib_sum = np.sum(weights_calib)
     weights_calib = weights_calib / weights_calib_sum
     q = (1 + weights_test / weights_calib_sum) * (1 - alpha)
+    q = np.minimum(q, 0.99)
     order = np.argsort(scores)
     scores = scores[order]
     weights_calib = weights_calib[order]

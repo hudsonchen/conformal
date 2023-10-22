@@ -10,8 +10,16 @@ def main():
     d = 10
 
     synthetic_setups = dict({"A": 1, "B": 0})
-    setup = 'A'
+    setup = 'B'
     alpha = 0.1
+
+    # df_train, df_test = generate_lilei_hua_data()
+    # _ = weighted_conformal_prediction([df_train, df_test], 
+    #                                   metalearner="DR", 
+    #                                   quantile_regression=True, 
+    #                                   alpha=0.1, 
+    #                                   test_frac=0.1)
+    # df_o = [df_train, df_test]
     df_o_T_0, df_o_T_1, df_i_T_0, df_i_T_1 = generate_data(n_observation=n_observation,
                                                             n_intervention=n_intervention,
                                                             d=d, 
@@ -20,7 +28,6 @@ def main():
     df_o = pd.concat([df_o_T_0, df_o_T_1])
     df_i = pd.concat([df_i_T_0, df_i_T_1])
 
-    oracle_width  = df_o["width"].loc[0]
     _ = weighted_conformal_prediction(df_o, 
                                       metalearner="DR", 
                                       quantile_regression=True, 
