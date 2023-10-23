@@ -88,10 +88,10 @@ class TCP:
 
     def predict_counterfactuals(self, alpha, X_test, Y1, Y0):
         # Predict Y(0)
-        X_train_obs_0 = self.X_train_obs[self.T_train_obs==1, :]
-        Y_train_obs_0 = self.Y_train_obs[self.T_train_obs==1]
-        X_train_inter_0 = self.X_train_inter[self.T_train_inter==1, :]
-        Y_train_inter_0 = self.Y_train_inter[self.T_train_inter==1]
+        X_train_obs_0 = self.X_train_obs[self.T_train_obs==0, :]
+        Y_train_obs_0 = self.Y_train_obs[self.T_train_obs==0]
+        X_train_inter_0 = self.X_train_inter[self.T_train_inter==0, :]
+        Y_train_inter_0 = self.Y_train_inter[self.T_train_inter==0]
 
         D_train_0 = jnp.concatenate((X_train_obs_0, Y_train_obs_0[:, None]), axis=1)
         D_inter_0 = jnp.concatenate((X_train_inter_0, Y_train_inter_0[:, None]), axis=1)
@@ -111,7 +111,7 @@ class TCP:
             for y in Y_interval_0[i, :]:
                 weight_test = self.density_models_0.compute_density_ratio(np.array(jnp.concatenate((x_test, jnp.array([y])), axis=0)[None, :]))
                 Y_train_test_mixed = jnp.concatenate((Y_train_obs_0, jnp.array([y])), axis=0)
-                self.fit(X_train_test_mixed, Y_train_test_mixed, T=1)
+                self.fit(X_train_test_mixed, Y_train_test_mixed, T=0)
                 Y0_hat = self.models_0.predict(X_train_test_mixed)
                 scores_0 = jnp.abs(Y0_hat - Y_train_test_mixed)
                 offset_0 = utils.weighted_transductive_conformal(alpha, weights_train_0, weight_test, scores_0)

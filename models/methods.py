@@ -57,7 +57,7 @@ def conformal_metalearner(df, metalearner="DR", quantile_regression=True, alpha=
     True_effects           = test_data[['Y1']].values.reshape((-1,)) - test_data[['Y0']].values.reshape((-1,))
     CATE                   = test_data[['CATE']].values
 
-    conditional_coverage   = np.mean((True_effects >= T_hat_DR_l) & (True_effects <= T_hat_DR_u))
+    coverage   = np.mean((True_effects >= T_hat_DR_l) & (True_effects <= T_hat_DR_u))
     average_interval_width = np.mean(np.abs(T_hat_DR_u - T_hat_DR_l))
     PEHE                   = np.sqrt(np.mean((CATE-T_hat_DR)**2))
 
@@ -65,7 +65,7 @@ def conformal_metalearner(df, metalearner="DR", quantile_regression=True, alpha=
 
     conformity_scores = (meta_conformity_score, oracle_conformity_score)
 
-    return conditional_coverage, average_interval_width, PEHE, conformity_scores
+    return coverage, average_interval_width, PEHE, conformity_scores
 
 
 
@@ -97,13 +97,12 @@ def weighted_conformal_prediction(df_o, quantile_regression, alpha, test_frac, m
         model.conformalize(alpha, method='naive')
         C0, C1 = model.predict_counterfactuals(alpha, X_test)
 
-        conditional_coverage_0 = np.mean((Y0 >= C0[0]) & (Y0 <= C0[1]))
-        conditional_coverage_1 = np.mean((Y1 >= C1[0]) & (Y1 <= C1[1]))
-        print('Coverage of Y(0)', conditional_coverage_0)
-        print('Interval width of Y(0)', np.mean(np.abs(C0[1] - C0[0])))
-        print('Coverage of Y(1)', conditional_coverage_1)
-        print('Interval width of Y(1)', np.mean(np.abs(C1[1] - C1[0])))
-        pause = True
+        coverage_0 = np.mean((Y0 >= C0[0]) & (Y0 <= C0[1]))
+        coverage_1 = np.mean((Y1 >= C1[0]) & (Y1 <= C1[1]))
+        interval_width_0 = jnp.mean(jnp.abs(C0[1] - C0[0]))
+        interval_width_1 = jnp.mean(jnp.abs(C1[1] - C1[0]))
+        return coverage_0, coverage_1, interval_width_0, interval_width_1
+    
     elif method == 'naive_ITE':
         model = WCP(train_data=train_data,
                     alpha=alpha, 
@@ -174,10 +173,9 @@ def transductive_weighted_conformal(df_o, df_i, quantile_regression, alpha, test
         model.conformalize(alpha, method='naive')
         C0_l, C0_u, C1_l, C1_u = model.predict_counterfactuals(alpha, X_test, Y1, Y0)
 
-        conditional_coverage_0 = jnp.mean((Y0 >= C0_l) & (Y0 <= C0_u))
-        conditional_coverage_1 = jnp.mean((Y1 >= C1_l) & (Y1 <= C1_u))
-        print('Coverage of Y(0)', conditional_coverage_0)
-        print('Interval width of Y(0)', jnp.mean(jnp.abs(C0_u - C0_l)))
-        print('Coverage of Y(1)', conditional_coverage_1)
-        print('Interval width of Y(1)', jnp.mean(jnp.abs(C1_u - C1_l)))
+        coverage_0 = jnp.mean((Y0 >= C0_l) & (Y0 <= C0_u))
+        coverage_1 = jnp.mean((Y1 >= C1_l) & (Y1 <= C1_u))
+        interval_width_0 = jnp.mean(jnp.abs(C0_u - C0_l))
+        interval_width_1 = jnp.mean(jnp.abs(C1_u - C1_l))
         pause = True
+        return coverage_0, coverage_1, interval_width_0, interval_width_1
