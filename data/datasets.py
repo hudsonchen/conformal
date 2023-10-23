@@ -194,12 +194,7 @@ def generate_data(n_observation, n_intervention, d, gamma, alpha):
     df_intervention["CATE"]   = tau - tau_0
     df_intervention["width"]  = np.mean(np.sqrt(2)*(np.sqrt(2)*std)*erfinv(2*(1-(alpha/2))-1) * 2) 
 
-    df_observation_T_0 = df_observation[df_observation["T"] == 0]
-    df_observation_T_1 = df_observation[df_observation["T"] == 1]
-    df_intervention_T_0 = df_intervention[df_intervention["T"] == 0]
-    df_intervention_T_1 = df_intervention[df_intervention["T"] == 1]
-
-    return df_observation_T_0, df_observation_T_1, df_intervention_T_0, df_intervention_T_1
+    return df_observation, df_intervention
 
 
 def generate_lilei_hua_data():

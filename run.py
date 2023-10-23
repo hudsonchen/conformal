@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 
 from data.datasets import *
-from models.metalearners import *
+from models.methods import *
 
 def main():
     n_observation = 1000
@@ -10,7 +10,7 @@ def main():
     d = 10
 
     synthetic_setups = dict({"A": 1, "B": 0})
-    setup = 'B'
+    setup = 'A'
     alpha = 0.1
 
     # df_train, df_test = generate_lilei_hua_data()
@@ -20,24 +20,28 @@ def main():
     #                                   alpha=0.1, 
     #                                   test_frac=0.1)
     # df_o = [df_train, df_test]
-    df_o_T_0, df_o_T_1, df_i_T_0, df_i_T_1 = generate_data(n_observation=n_observation,
+    df_o, df_i = generate_data(n_observation=n_observation,
                                                             n_intervention=n_intervention,
                                                             d=d, 
                                                             gamma=synthetic_setups[setup], 
                                                             alpha=alpha) 
-    df_o = pd.concat([df_o_T_0, df_o_T_1])
-    df_i = pd.concat([df_i_T_0, df_i_T_1])
-
-    _ = weighted_conformal_prediction(df_o, 
-                                      metalearner="DR", 
-                                      quantile_regression=True, 
-                                      alpha=0.1, 
-                                      test_frac=0.1)
-    conditional_coverage, average_interval_width, PEHE, conformity_scores = conformal_metalearner(df_o, 
-                                                                                                  metalearner="DR", 
-                                                                                                  quantile_regression=True, 
-                                                                                                  alpha=0.1, 
-                                                                                                  test_frac=0.1)
+    _ = transductive_weighted_conformal(df_o,
+                                        df_i,
+                                        quantile_regression=True,
+                                        alpha=0.1,
+                                        test_frac=0.1,
+                                        method="counterfactual")
+    
+    # _ = weighted_conformal_prediction(df_o, 
+    #                                   quantile_regression=True, 
+    #                                   alpha=0.1, 
+    #                                   test_frac=0.1,
+    #                                   method="counterfactual")
+    # conditional_coverage, average_interval_width, PEHE, conformity_scores = conformal_metalearner(df_o, 
+    #                                                                                               metalearner="DR", 
+    #                                                                                               quantile_regression=True, 
+    #                                                                                               alpha=0.1, 
+    #                                                                                               test_frac=0.1)
     print(conditional_coverage)
     print(average_interval_width)
     print(PEHE)

@@ -1,15 +1,15 @@
-# Copyright (c) 2023, Ahmed Alaa
-# Licensed under the BSD 3-clause license (see LICENSE.txt)
-
 from __future__ import absolute_import, division, print_function
 
 import sys, os, time
+import jax.numpy as jnp
+import jax
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from quantile_forest import RandomForestQuantileRegressor
 from densratio import densratio
+from tqdm import tqdm
 
 import numpy as np
 import models.utils as utils
@@ -25,15 +25,17 @@ base_learners_dict = dict({"GBM": GradientBoostingRegressor,
                            "QRF": RandomForestQuantileRegressor})
 
 
-class WCP:
+class TCP:
 
     """
 
     """
 
-    def __init__(self, data_obs, n_folds=5, alpha=0.1, base_learner="GBM", quantile_regression=True):
+    def __init__(self, data_obs, data_inter, n_folds=5, alpha=0.1, base_learner="GBM", quantile_regression=True):
 
         """
+        Transductive conformal prediction
+
             :param n_folds: the number of folds for the DR learner cross-fitting (See [1])
             :param alpha: the target miscoverage level. alpha=.1 means that target coverage is 90%
             :param base_learner: the underlying regression model
@@ -59,12 +61,13 @@ class WCP:
             first_CQR_args_l = dict({"default_quantiles":self.alpha/2, "n_estimators": n_estimators_target})
         else:
             raise ValueError('base_learner must be one of GBM, QRF')
-        self.models_u_0 = [base_learners_dict[self.base_learner](**first_CQR_args_u) for _ in range(self.n_folds)]
-        self.models_l_0 = [base_learners_dict[self.base_learner](**first_CQR_args_l) for _ in range(self.n_folds)] 
-        self.models_u_1 = [base_learners_dict[self.base_learner](**first_CQR_args_u) for _ in range(self.n_folds)]
-        self.models_l_1 = [base_learners_dict[self.base_learner](**first_CQR_args_l) for _ in range(self.n_folds)] 
+        self.models_u_0 = base_learners_dict[self.base_learner](**first_CQR_args_u) 
+        self.models_l_0 = base_learners_dict[self.base_learner](**first_CQR_args_l) 
+        self.models_u_1 = base_learners_dict[self.base_learner](**first_CQR_args_u) 
+        self.models_l_1 = base_learners_dict[self.base_learner](**first_CQR_args_l) 
 
-        self.pscores_models = [GradientBoostingClassifier() for _ in range(self.n_folds)]
+        self.density_models_0 = None
+        self.density_models_1 = None
 
         if self.base_learner == "GBM":
             second_CQR_args_u = dict({"loss": "quantile", "alpha":0.6, "n_estimators": n_estimators_target})
@@ -73,96 +76,68 @@ class WCP:
             second_CQR_args_u = dict({"default_quantiles":0.6, "n_estimators": n_estimators_target}) 
             second_CQR_args_l = dict({"default_quantiles":0.4, "n_estimators": n_estimators_target})
         
-        self.tilde_C_ITE_model_u = [base_learners_dict[self.base_learner](**second_CQR_args_u) for _ in range(self.n_folds)] 
-        self.tilde_C_ITE_model_l = [base_learners_dict[self.base_learner](**second_CQR_args_l) for _ in range(self.n_folds)] 
+        self.tilde_C_ITE_model_u = base_learners_dict[self.base_learner](**second_CQR_args_u) 
+        self.tilde_C_ITE_model_l = base_learners_dict[self.base_learner](**second_CQR_args_l) 
 
         self.data_obs = data_obs
-        
-        # initialize the lists for storing the cross-fitting indices
-        self.train_obs_index_list = []
-        self.calib_obs_index_list = []
-        for _ in range(self.n_folds):
-            self.train_obs_index_list.append(np.random.permutation(data_obs.index)[:int(0.75 * len(data_obs.index))])
-            self.calib_obs_index_list.append(np.random.permutation(data_obs.index)[int(0.75 * len(data_obs.index)):])   
-        
-        self.X_train_obs_list, self.T_train_obs_list, self.Y_train_obs_list = [], [], []
-        self.X_calib_obs_list, self.T_calib_obs_list, self.Y_calib_obs_list = [], [], []
-        for i in range(self.n_folds):
-            self.X_train_obs_list.append(data_obs.loc[self.train_obs_index_list[i]].filter(like = 'X').values)
-            self.T_train_obs_list.append(data_obs.loc[self.train_obs_index_list[i]]['T'].values)
-            self.Y_train_obs_list.append(data_obs.loc[self.train_obs_index_list[i]]['Y'].values)
-            self.X_calib_obs_list.append(data_obs.loc[self.calib_obs_index_list[i]].filter(like = 'X').values)
-            self.T_calib_obs_list.append(data_obs.loc[self.calib_obs_index_list[i]]['T'].values)
-            self.Y_calib_obs_list.append(data_obs.loc[self.calib_obs_index_list[i]]['Y'].values)
+        self.X_train_obs = data_obs.filter(like = 'X').values
+        self.T_train_obs = data_obs['T'].values
+        self.Y_train_obs = data_obs['Y'].values
 
+        self.data_inter = data_inter
+        self.X_train_inter = data_inter.filter(like = 'X').values
+        self.T_train_inter = data_inter['T'].values
+        self.Y_train_inter = data_inter['Y'].values
+
+        self.Y_min, self.Y_max = [np.min(self.Y_train_obs), np.max(self.Y_train_obs)]
+        self.Y_interval = np.linspace(self.Y_min, self.Y_max, 100)
         return
 
-    def fit(self):
+    def fit(self, X, y, T):
         """
         Fits the plug-in models and meta-learners using the sample (X, W, Y) and true propensity scores pscores
         """
+        if T == 0:
+            self.models_u_0.fit(X, y)
+            self.models_l_0.fit(X, y)
+        else:
+            self.models_u_1.fit(X, y)
+            self.models_l_1.fit(X, y)
 
-        # loop over the cross-fitting folds
-        for i in range(self.n_folds):
-            X_train, T_train, Y_train = self.X_train_obs_list[i], self.T_train_obs_list[i], self.Y_train_obs_list[i]
+    def predict_counterfactuals(self, alpha, X_test, Y_test):
+        # Predict Y(1)
+        X_train_obs_1 = self.X_train_obs[self.T_train_obs==1, :]
+        Y_train_obs_1 = self.Y_train_obs[self.T_train_obs==1]
+        X_train_inter_1 = self.X_train_inter[self.T_train_inter==1, :]
+        Y_train_inter_1 = self.Y_train_inter[self.T_train_inter==1]
 
-            self.pscores_models[i].fit(X_train, T_train)
-            self.models_u_0[i].fit(X_train[T_train==0, :], Y_train[T_train==0])
-            self.models_l_0[i].fit(X_train[T_train==0, :], Y_train[T_train==0])
-            self.models_u_1[i].fit(X_train[T_train==1, :], Y_train[T_train==1])
-            self.models_l_1[i].fit(X_train[T_train==1, :], Y_train[T_train==1])
-
-    def predict_counterfactuals(self, alpha, X_test):
-        def weight_1(model, x):
-            pscores = model.predict_proba(x)[:, 1]
-            return 1. / pscores
+        D_train_1 = np.concatenate((X_train_obs_1, Y_train_obs_1[:, None]), axis=1)
+        D_inter_1 = np.concatenate((X_train_inter_1, Y_train_inter_1[:, None]), axis=1)
+        self.density_models_1 = densratio(D_inter_1, D_train_1, alpha=alpha)
+        weights_train_1 = self.density_models_1.compute_density_ratio(D_train_1)
         
-        def weight_0(model, x):
-            pscores = model.predict_proba(x)[:, 1]
-            return 1. / (1.0 - pscores)
-    
-        y0_l_list, y0_u_list, y1_l_list, y1_u_list = [], [], [], []
-        offset_0_list, offset_1_list = [], []
+        Y_interval_min = Y_train_inter_1.mean() - 3 * Y_train_inter_1.std()
+        Y_interval_max = Y_train_inter_1.mean() + 3 * Y_train_inter_1.std()
+        Y_interval = np.linspace(Y_interval_min, Y_interval_max, 10)
+        y_test_min, y_test_max = np.zeros(len(X_test)), np.zeros(len(X_test))
 
-        for i in range(self.n_folds):
-            X_calib_0 = self.X_calib_obs_list[i][self.T_calib_obs_list[i]==0, :]
-            X_calib_1 = self.X_calib_obs_list[i][self.T_calib_obs_list[i]==1, :]
-            Y_calib_0 = self.Y_calib_obs_list[i][self.T_calib_obs_list[i]==0]
-            Y_calib_1 = self.Y_calib_obs_list[i][self.T_calib_obs_list[i]==1]
-
-            Y1_calib_hat_u = self.models_u_1[i].predict(X_calib_1)
-            Y1_calib_hat_l = self.models_l_1[i].predict(X_calib_1)
-
-            weights_calib_1, weights_test_1, scores_1 = utils.weights_and_scores(weight_1, X_test, X_calib_1, Y_calib_1, 
-                                                Y1_calib_hat_l, Y1_calib_hat_u, self.pscores_models[i])
-            offset_1 = utils.weighted_conformal(alpha, weights_calib_1, weights_test_1, scores_1)
-            
-            Y0_calib_hat_u = self.models_u_0[i].predict(X_calib_0)
-            Y0_calib_hat_l = self.models_l_0[i].predict(X_calib_0)
-
-            weights_calib_0, weights_test_0, scores_0 = utils.weights_and_scores(weight_0, X_test, X_calib_0, Y_calib_0, 
-                                                Y0_calib_hat_l, Y0_calib_hat_u, self.pscores_models[i])
-            offset_0 = utils.weighted_conformal(alpha, weights_calib_0, weights_test_0, scores_0)
-
-            offset_0_list.append(offset_0)
-            offset_1_list.append(offset_1)
-
-            y1_l = self.models_l_1[i].predict(X_test)
-            y1_u = self.models_u_1[i].predict(X_test)
-            y0_l = self.models_l_0[i].predict(X_test)
-            y0_u = self.models_u_0[i].predict(X_test)
-            
-            y0_l_list.append(y0_l)
-            y0_u_list.append(y0_u)
-            y1_l_list.append(y1_l)
-            y1_u_list.append(y1_u)
-        
-        y0_l = np.median(np.array(y0_l_list), axis=0) - np.median(np.array(offset_0_list), axis=0)
-        y0_u = np.median(np.array(y0_u_list), axis=0) + np.median(np.array(offset_0_list), axis=0)
-        y1_l = np.median(np.array(y1_l_list), axis=0) - np.median(np.array(offset_1_list), axis=0)
-        y1_u = np.median(np.array(y1_u_list), axis=0) + np.median(np.array(offset_1_list), axis=0)
-        pause = True
-        return [y0_l, y0_u], [y1_l, y1_u]
+        for x_test in X_test:
+            X_train_test_mixed = np.concatenate((X_train_obs_1, x_test[None, :]), axis=0)
+            y_interval = []
+            for y in Y_interval:
+                weight_test = self.density_models_1.compute_density_ratio(np.concatenate((x_test, np.array([y])), axis=0)[None, :])
+                Y_train_test_mixed = np.concatenate((Y_train_obs_1, np.array([y])), axis=0)
+                self.fit(X_train_test_mixed, Y_train_test_mixed, T=1)
+                Y1_hat_u = self.models_u_1.predict(X_train_test_mixed)
+                Y1_hat_l = self.models_l_1.predict(X_train_test_mixed)
+                scores_1 = np.maximum(Y1_hat_l - Y_train_test_mixed, Y_train_test_mixed - Y1_hat_u)
+                offset_1 = utils.weighted_transductive_conformal(alpha, weights_train_1, weight_test, scores_1)
+                print(scores_1[-1], offset_1)
+                if scores_1[-1] <= offset_1:
+                    y_interval.append(y)
+            y_test_min.append(min(y_interval))
+            y_test_max.append(max(y_interval))
+        return [y_test_min, y_test_max]
     
     def predict_ITE(self, alpha, X_test, method='naive'):
         """
