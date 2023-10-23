@@ -1,4 +1,6 @@
 import numpy as np
+import jax.numpy as jnp
+import jax
 import pandas as pd
 from scipy.stats import norm, beta
 from sklearn.ensemble import RandomForestRegressor
@@ -167,15 +169,15 @@ def transductive_weighted_conformal(df_o, df_i, quantile_regression, alpha, test
         model = TCP(data_obs=train_data,
                     data_inter=df_i,
                     alpha=alpha, 
-                    base_learner="QRF", 
+                    base_learner="RF", 
                     quantile_regression=quantile_regression) 
         model.conformalize(alpha, method='naive')
-        C0, C1 = model.predict_counterfactuals(alpha, X_test, Y_test)
+        C0_l, C0_u, C1_l, C1_u = model.predict_counterfactuals(alpha, X_test, Y1, Y0)
 
-        conditional_coverage_0 = np.mean((Y0 >= C0[0]) & (Y0 <= C0[1]))
-        conditional_coverage_1 = np.mean((Y1 >= C1[0]) & (Y1 <= C1[1]))
+        conditional_coverage_0 = jnp.mean((Y0 >= C0_l) & (Y0 <= C0_u))
+        conditional_coverage_1 = jnp.mean((Y1 >= C1_l) & (Y1 <= C1_u))
         print('Coverage of Y(0)', conditional_coverage_0)
-        print('Interval width of Y(0)', np.mean(np.abs(C0[1] - C0[0])))
+        print('Interval width of Y(0)', jnp.mean(jnp.abs(C0_u - C0_l)))
         print('Coverage of Y(1)', conditional_coverage_1)
-        print('Interval width of Y(1)', np.mean(np.abs(C1[1] - C1[0])))
+        print('Interval width of Y(1)', jnp.mean(jnp.abs(C1_u - C1_l)))
         pause = True

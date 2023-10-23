@@ -20,11 +20,13 @@ def main():
     #                                   alpha=0.1, 
     #                                   test_frac=0.1)
     # df_o = [df_train, df_test]
-    df_o, df_i = generate_data(n_observation=n_observation,
-                                                            n_intervention=n_intervention,
-                                                            d=d, 
-                                                            gamma=synthetic_setups[setup], 
-                                                            alpha=alpha) 
+    rng_key = jax.random.PRNGKey(42)
+    df_o, df_i = generate_data(rng_key=rng_key,
+                               n_observation=n_observation,    
+                                n_intervention=n_intervention,
+                                d=d, 
+                                gamma=synthetic_setups[setup], 
+                                alpha=alpha) 
     _ = transductive_weighted_conformal(df_o,
                                         df_i,
                                         quantile_regression=True,

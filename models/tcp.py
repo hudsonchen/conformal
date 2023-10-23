@@ -8,9 +8,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from quantile_forest import RandomForestQuantileRegressor
+# import density_ratio_estimation.src.densityratio as densityratio
 from densratio import densratio
 from tqdm import tqdm
-
+from functools import partial
 import numpy as np
 import models.utils as utils
 
@@ -22,7 +23,7 @@ if not sys.warnoptions:
 # Global options for baselearners (see class attributes below)
 
 base_learners_dict = dict({"GBM": GradientBoostingRegressor, 
-                           "QRF": RandomForestQuantileRegressor})
+                           "RF": RandomForestRegressor})
 
 
 class TCP:
@@ -54,30 +55,16 @@ class TCP:
         n_estimators_target = 100
         
         if self.base_learner == "GBM":
-            first_CQR_args_u = dict({"loss": "quantile", "alpha":1 - (self.alpha / 2), "n_estimators": n_estimators_target}) 
-            first_CQR_args_l = dict({"loss": "quantile", "alpha":self.alpha/2, "n_estimators": n_estimators_target}) 
-        elif self.base_learner == "QRF":
-            first_CQR_args_u = dict({"default_quantiles":1 - (self.alpha/2), "n_estimators": n_estimators_target})
-            first_CQR_args_l = dict({"default_quantiles":self.alpha/2, "n_estimators": n_estimators_target})
+            first_CQR_args = dict({"loss": "squared_error", "n_estimators": n_estimators_target}) 
+        elif self.base_learner == "RF":
+            first_CQR_args = dict({"criterion": "squared_error", "n_estimators": n_estimators_target}) 
         else:
-            raise ValueError('base_learner must be one of GBM, QRF')
-        self.models_u_0 = base_learners_dict[self.base_learner](**first_CQR_args_u) 
-        self.models_l_0 = base_learners_dict[self.base_learner](**first_CQR_args_l) 
-        self.models_u_1 = base_learners_dict[self.base_learner](**first_CQR_args_u) 
-        self.models_l_1 = base_learners_dict[self.base_learner](**first_CQR_args_l) 
+            raise ValueError('base_learner must be one of GBM or RF')
+        self.models_0 = base_learners_dict[self.base_learner](**first_CQR_args) 
+        self.models_1 = base_learners_dict[self.base_learner](**first_CQR_args) 
 
         self.density_models_0 = None
         self.density_models_1 = None
-
-        if self.base_learner == "GBM":
-            second_CQR_args_u = dict({"loss": "quantile", "alpha":0.6, "n_estimators": n_estimators_target})
-            second_CQR_args_l = dict({"loss": "quantile", "alpha":0.4, "n_estimators": n_estimators_target})
-        elif self.base_learner == "QRF":
-            second_CQR_args_u = dict({"default_quantiles":0.6, "n_estimators": n_estimators_target}) 
-            second_CQR_args_l = dict({"default_quantiles":0.4, "n_estimators": n_estimators_target})
-        
-        self.tilde_C_ITE_model_u = base_learners_dict[self.base_learner](**second_CQR_args_u) 
-        self.tilde_C_ITE_model_l = base_learners_dict[self.base_learner](**second_CQR_args_l) 
 
         self.data_obs = data_obs
         self.X_train_obs = data_obs.filter(like = 'X').values
@@ -88,9 +75,6 @@ class TCP:
         self.X_train_inter = data_inter.filter(like = 'X').values
         self.T_train_inter = data_inter['T'].values
         self.Y_train_inter = data_inter['Y'].values
-
-        self.Y_min, self.Y_max = [np.min(self.Y_train_obs), np.max(self.Y_train_obs)]
-        self.Y_interval = np.linspace(self.Y_min, self.Y_max, 100)
         return
 
     def fit(self, X, y, T):
@@ -98,46 +82,80 @@ class TCP:
         Fits the plug-in models and meta-learners using the sample (X, W, Y) and true propensity scores pscores
         """
         if T == 0:
-            self.models_u_0.fit(X, y)
-            self.models_l_0.fit(X, y)
+            self.models_0.fit(X, y)
         else:
-            self.models_u_1.fit(X, y)
-            self.models_l_1.fit(X, y)
+            self.models_1.fit(X, y)
 
-    def predict_counterfactuals(self, alpha, X_test, Y_test):
+    def predict_counterfactuals(self, alpha, X_test, Y1, Y0):
+        # Predict Y(0)
+        X_train_obs_0 = self.X_train_obs[self.T_train_obs==1, :]
+        Y_train_obs_0 = self.Y_train_obs[self.T_train_obs==1]
+        X_train_inter_0 = self.X_train_inter[self.T_train_inter==1, :]
+        Y_train_inter_0 = self.Y_train_inter[self.T_train_inter==1]
+
+        D_train_0 = jnp.concatenate((X_train_obs_0, Y_train_obs_0[:, None]), axis=1)
+        D_inter_0 = jnp.concatenate((X_train_inter_0, Y_train_inter_0[:, None]), axis=1)
+
+        self.density_models_0 = densratio(np.array(D_inter_0), np.array(D_train_0))
+        weights_train_0 = self.density_models_0.compute_density_ratio(np.array(D_train_0))
+        
+        self.fit(X_train_obs_0, Y_train_obs_0, T=0)
+        Y_interval_0_min = self.models_0.predict(X_test) - 3 * Y_train_inter_0.std()
+        Y_interval_0_max = self.models_0.predict(X_test) + 3 * Y_train_inter_0.std()
+        Y_interval_0 = jnp.linspace(Y_interval_0_min, Y_interval_0_max, 50).T
+        y_test_0_min, y_test_0_max = jnp.zeros(len(X_test)), jnp.zeros(len(X_test))
+        
+        for i, x_test in enumerate(tqdm(X_test)):
+            X_train_test_mixed = jnp.concatenate((X_train_obs_0, x_test[None, :]), axis=0)
+            y_interval = []
+            for y in Y_interval_0[i, :]:
+                weight_test = self.density_models_0.compute_density_ratio(np.array(jnp.concatenate((x_test, jnp.array([y])), axis=0)[None, :]))
+                Y_train_test_mixed = jnp.concatenate((Y_train_obs_0, jnp.array([y])), axis=0)
+                self.fit(X_train_test_mixed, Y_train_test_mixed, T=1)
+                Y0_hat = self.models_0.predict(X_train_test_mixed)
+                scores_0 = jnp.abs(Y0_hat - Y_train_test_mixed)
+                offset_0 = utils.weighted_transductive_conformal(alpha, weights_train_0, weight_test, scores_0)
+                # print(scores_0[-1], offset_0)
+                if scores_0[-1] < offset_0:
+                    y_interval.append(float(y))
+            y_test_0_min = y_test_0_min.at[i].set(min(y_interval))
+            y_test_0_max = y_test_0_max.at[i].set(max(y_interval))
+
         # Predict Y(1)
         X_train_obs_1 = self.X_train_obs[self.T_train_obs==1, :]
         Y_train_obs_1 = self.Y_train_obs[self.T_train_obs==1]
         X_train_inter_1 = self.X_train_inter[self.T_train_inter==1, :]
         Y_train_inter_1 = self.Y_train_inter[self.T_train_inter==1]
 
-        D_train_1 = np.concatenate((X_train_obs_1, Y_train_obs_1[:, None]), axis=1)
-        D_inter_1 = np.concatenate((X_train_inter_1, Y_train_inter_1[:, None]), axis=1)
-        self.density_models_1 = densratio(D_inter_1, D_train_1, alpha=alpha)
-        weights_train_1 = self.density_models_1.compute_density_ratio(D_train_1)
-        
-        Y_interval_min = Y_train_inter_1.mean() - 3 * Y_train_inter_1.std()
-        Y_interval_max = Y_train_inter_1.mean() + 3 * Y_train_inter_1.std()
-        Y_interval = np.linspace(Y_interval_min, Y_interval_max, 10)
-        y_test_min, y_test_max = np.zeros(len(X_test)), np.zeros(len(X_test))
+        D_train_1 = jnp.concatenate((X_train_obs_1, Y_train_obs_1[:, None]), axis=1)
+        D_inter_1 = jnp.concatenate((X_train_inter_1, Y_train_inter_1[:, None]), axis=1)
 
-        for x_test in X_test:
-            X_train_test_mixed = np.concatenate((X_train_obs_1, x_test[None, :]), axis=0)
+        self.density_models_1 = densratio(np.array(D_inter_1), np.array(D_train_1))
+        weights_train_1 = self.density_models_1.compute_density_ratio(np.array(D_train_1))
+        
+        self.fit(X_train_obs_1, Y_train_obs_1, T=1)
+        Y_interval_1_min = self.models_1.predict(X_test) - 3 * Y_train_inter_1.std()
+        Y_interval_1_max = self.models_1.predict(X_test) + 3 * Y_train_inter_1.std()
+        Y_interval_1 = jnp.linspace(Y_interval_1_min, Y_interval_1_max, 50).T
+        y_test_1_min, y_test_1_max = jnp.zeros(len(X_test)), jnp.zeros(len(X_test))
+        
+        for i, x_test in enumerate(tqdm(X_test)):
+            X_train_test_mixed = jnp.concatenate((X_train_obs_1, x_test[None, :]), axis=0)
             y_interval = []
-            for y in Y_interval:
-                weight_test = self.density_models_1.compute_density_ratio(np.concatenate((x_test, np.array([y])), axis=0)[None, :])
-                Y_train_test_mixed = np.concatenate((Y_train_obs_1, np.array([y])), axis=0)
+            for y in Y_interval_1[i, :]:
+                weight_test = self.density_models_1.compute_density_ratio(np.array(jnp.concatenate((x_test, jnp.array([y])), axis=0)[None, :]))
+                Y_train_test_mixed = jnp.concatenate((Y_train_obs_1, jnp.array([y])), axis=0)
                 self.fit(X_train_test_mixed, Y_train_test_mixed, T=1)
-                Y1_hat_u = self.models_u_1.predict(X_train_test_mixed)
-                Y1_hat_l = self.models_l_1.predict(X_train_test_mixed)
-                scores_1 = np.maximum(Y1_hat_l - Y_train_test_mixed, Y_train_test_mixed - Y1_hat_u)
+                Y1_hat = self.models_1.predict(X_train_test_mixed)
+                scores_1 = jnp.abs(Y1_hat - Y_train_test_mixed)
                 offset_1 = utils.weighted_transductive_conformal(alpha, weights_train_1, weight_test, scores_1)
-                print(scores_1[-1], offset_1)
-                if scores_1[-1] <= offset_1:
-                    y_interval.append(y)
-            y_test_min.append(min(y_interval))
-            y_test_max.append(max(y_interval))
-        return [y_test_min, y_test_max]
+                # print(scores_1[-1], offset_1)
+                if scores_1[-1] < offset_1:
+                    y_interval.append(float(y))
+            y_test_1_min = y_test_1_min.at[i].set(min(y_interval))
+            y_test_1_max = y_test_1_max.at[i].set(max(y_interval))
+
+        return y_test_0_min, y_test_0_max, y_test_1_min, y_test_1_max
     
     def predict_ITE(self, alpha, X_test, method='naive'):
         """
