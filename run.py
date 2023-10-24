@@ -40,25 +40,26 @@ def main(args):
                                 alpha=alpha,
                                 confouding=True) 
     
-    print("Transductive weighted conformal prediction (Ours)")
+    
     coverage_0, coverage_1, interval_width_0, interval_width_1 = transductive_weighted_conformal(df_o,
                                         df_i,
                                         quantile_regression=True,
                                         alpha=alpha,
                                         test_frac=test_frac,
                                         method="counterfactual")
+    print("Transductive weighted conformal prediction (Ours)")
     print('Coverage of Y(0)', coverage_0)
     print('Interval width of Y(0)', interval_width_0)
     print('Coverage of Y(1)', coverage_1)
     print('Interval width of Y(1)', interval_width_1)
 
-    print("\n\n" + "=" * 20 + '\n\n')
-    print("Split weighted conformal prediction (Li Leihua)")
     coverage_0, coverage_1, interval_width_0, interval_width_1 = weighted_conformal_prediction(df_o, 
                                       quantile_regression=True, 
                                       alpha=alpha, 
                                       test_frac=test_frac,
                                       method="counterfactual")
+    print("\n\n" + "=" * 20 + '\n\n')
+    print("Split weighted conformal prediction (Li Leihua)")
     print('Coverage of Y(0)', coverage_0)
     print('Interval width of Y(0)', interval_width_0)
     print('Coverage of Y(1)', coverage_1)
