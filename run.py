@@ -23,7 +23,7 @@ def main(args):
     synthetic_setups = dict({"A": 1, "B": 0})
     setup = 'A'
     alpha = 0.1
-
+    test_frac=0.1
     # df_train, df_test = generate_lilei_hua_data()
     # _ = weighted_conformal_prediction([df_train, df_test], 
     #                                   metalearner="DR", 
@@ -36,15 +36,16 @@ def main(args):
                                n_observation=n_observation,    
                                 n_intervention=n_intervention,
                                 d=d, 
-                                gamma=synthetic_setups[setup], 
-                                alpha=alpha) 
+                                gamma=0.5, 
+                                alpha=alpha,
+                                confouding=True) 
     
     print("Transductive weighted conformal prediction (Ours)")
     coverage_0, coverage_1, interval_width_0, interval_width_1 = transductive_weighted_conformal(df_o,
                                         df_i,
                                         quantile_regression=True,
-                                        alpha=0.1,
-                                        test_frac=0.1,
+                                        alpha=alpha,
+                                        test_frac=test_frac,
                                         method="counterfactual")
     print('Coverage of Y(0)', coverage_0)
     print('Interval width of Y(0)', interval_width_0)
@@ -55,8 +56,8 @@ def main(args):
     print("Split weighted conformal prediction (Li Leihua)")
     coverage_0, coverage_1, interval_width_0, interval_width_1 = weighted_conformal_prediction(df_o, 
                                       quantile_regression=True, 
-                                      alpha=0.1, 
-                                      test_frac=0.1,
+                                      alpha=alpha, 
+                                      test_frac=test_frac,
                                       method="counterfactual")
     print('Coverage of Y(0)', coverage_0)
     print('Interval width of Y(0)', interval_width_0)

@@ -125,7 +125,7 @@ def NLSM_data():
     return dataset
 
 
-def generate_data(rng_key, n_observation, n_intervention, d, gamma, alpha):
+def generate_data(rng_key, n_observation, n_intervention, d, gamma, alpha, confouding):
     
     def correlated_covariates(rng_key, n, d):
         rho = 0.9
@@ -138,13 +138,21 @@ def generate_data(rng_key, n_observation, n_intervention, d, gamma, alpha):
     # Generate observation data
     rng_key, _ = jax.random.split(rng_key)
     X = jax.random.uniform(rng_key, shape=(n_observation, d))
-
-    tau = (2 / (1 + jnp.exp(-12 * (X[:, 0] - 0.5)))) * (2 / (1 + jnp.exp(-12 * (X[:, 1] - 0.5)))) 
-    tau = tau.reshape((-1,))
-
-    tau_0 = gamma * tau 
-    std = -jnp.log(X[:, 0] + 1e-9)
-    ps = (1 + beta.cdf(X[:, 0], 2, 4)) / 4
+    if confouding:
+        rng_key, _ = jax.random.split(rng_key)
+        U = jnp.abs(jax.random.normal(rng_key, shape=(n_observation, d)))
+        tau = (2 / (1 + jnp.exp(-12 * ((U[:, 0] + U[:, 0]) / 2 - 0.5)))) * (2 / (1 + jnp.exp(-12 * ((U[:, 1] + U[:, 1]) / 2 - 0.5)))) 
+        tau = tau.reshape((-1,))
+        tau_0 = gamma * tau 
+        # std = -jnp.log(jnp.minimum((U[:, 0] + U[:, 0]) / 2 + 1e-9, 0.99))
+        std = 1.0
+        ps = (1 + beta.cdf((U[:, 0] + U[:, 0]) / 2, 2, 4)) / 4
+    else:
+        tau = (2 / (1 + jnp.exp(-12 * (X[:, 0] - 0.5)))) * (2 / (1 + jnp.exp(-12 * (X[:, 1] - 0.5)))) 
+        tau = tau.reshape((-1,))
+        tau_0 = gamma * tau 
+        std = -jnp.log(X[:, 0] + 1e-9)
+        ps = (1 + beta.cdf(X[:, 0], 2, 4)) / 4
 
     rng_key, _ = jax.random.split(rng_key)
     errdist = jax.random.normal(rng_key, shape=(n_observation, ))
@@ -171,12 +179,21 @@ def generate_data(rng_key, n_observation, n_intervention, d, gamma, alpha):
     rng_key, _ = jax.random.split(rng_key)
     X = jax.random.uniform(rng_key, shape=(n_intervention, d))
 
-    tau = (2 / (1 + jnp.exp(-12 * (X[:, 0] - 0.5)))) * (2 / (1 + jnp.exp(-12 * (X[:, 1] - 0.5)))) 
-    tau = tau.reshape((-1,))
-
-    tau_0 = gamma * tau 
-    std = -jnp.log(X[:, 0] + 1e-9)
-    ps = (1 + beta.cdf(X[:, 0], 2, 4)) / 4
+    if confouding:
+        rng_key, _ = jax.random.split(rng_key)
+        U = jnp.abs(jax.random.normal(rng_key, shape=(n_intervention, d)))
+        tau = (2 / (1 + jnp.exp(-12 * ((U[:, 0] + U[:, 0]) / 2 - 0.5)))) * (2 / (1 + jnp.exp(-12 * ((U[:, 1] + U[:, 1]) / 2 - 0.5)))) 
+        tau = tau.reshape((-1,))
+        tau_0 = gamma * tau 
+        # std = -jnp.log(jnp.minimum((U[:, 0] + U[:, 0]) / 2 + 1e-9, 0.99))
+        std = 1.0
+        ps = (1 + beta.cdf((U[:, 0] + U[:, 0]) / 2, 2, 4)) / 4
+    else:
+        tau = (2 / (1 + jnp.exp(-12 * (X[:, 0] - 0.5)))) * (2 / (1 + jnp.exp(-12 * (X[:, 1] - 0.5)))) 
+        tau = tau.reshape((-1,))
+        tau_0 = gamma * tau 
+        std = -jnp.log(X[:, 0] + 1e-9)
+        ps = (1 + beta.cdf(X[:, 0], 2, 4)) / 4
 
     rng_key, _ = jax.random.split(rng_key)
     errdist = jax.random.normal(rng_key, shape=(n_intervention, ))

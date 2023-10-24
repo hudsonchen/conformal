@@ -96,7 +96,7 @@ class TCP:
         D_train_0 = jnp.concatenate((X_train_obs_0, Y_train_obs_0[:, None]), axis=1)
         D_inter_0 = jnp.concatenate((X_train_inter_0, Y_train_inter_0[:, None]), axis=1)
 
-        self.density_models_0 = densratio(np.array(D_inter_0), np.array(D_train_0))
+        self.density_models_0 = densratio(np.array(D_inter_0), np.array(D_train_0), alpha=0.01)
         weights_train_0 = self.density_models_0.compute_density_ratio(np.array(D_train_0))
         
         self.fit(X_train_obs_0, Y_train_obs_0, T=0)
